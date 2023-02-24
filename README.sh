@@ -1,171 +1,153 @@
+#
+# Install LinuxCNC on Debian Bullseye on 6.0 PREEMPT_RT kernel
+#
+# Thansk to
+#   https://forum.odroid.com/viewtopic.php?f=179&t=43719&start=200
+#   https://forum.linuxcnc.org/18-computer/48113-odroid-as-raplacement-for-raspberry-pi
+#
 
-# ----------------------
+#######################################
 # On: host machine
-# ----------------------
+#######################################
 
-# Flash
-#   http://ppa.linuxfactory.or.kr/images/raw/arm64/jammy/ubuntu-22.04-server-odroidn2plus-20221115.img.xz
-# using Balena Etcher
+# Download image
+curl -O -L https://oph.mdrjr.net/meveric/images/Bullseye/Debian-Bullseye64-1.5-20221220-N2.img.xz
+
+# and write it to sd card
+xzcat Debian-Bullseye64-1.5-20221220-N2.img.xz | sudo dd bs=4M of=/dev/mmcblk0
 
 # Disable journaling on root fs
-umount /media/$USER/rootfs
 sudo tune2fs -O ^has_journal /dev/mmcblk0p2
-sudo mkdir -p /media/$USER/rootfs
-sudo mount /dev/mmcblk0p2 /media/$USER/rootfs
 
-# ----------------------
-# On: host machine
-# ----------------------
-
-# Start docker build container
-docker run -it -v /media/$USER/rootfs:/media/$USER/rootfs -v  /media/$USER/BOOT:/media/$USER/BOOT --name linuxcnc ubuntu:22.04
-# or restart an existing one if you already built the kernel
-# docker start linuxcnc
-# docker exec -it linuxcnc bash
-
-# ----------------------
-# On: docker container
-# ----------------------
-
-USER=alangibson
-LINARO_VERSION=gcc-linaro-12.2.1-2023.01-x86_64_aarch64-linux-gnu
-
-# Set up cross compile environment
-dpkg --add-architecture arm64
-sed -i 's/deb /deb [arch=amd64] /' /etc/apt/sources.list
-cat >> /etc/apt/sources.list << EOF
-deb [arch=arm64] http://ports.ubuntu.com/ jammy main restricted
-deb [arch=arm64] http://ports.ubuntu.com/ jammy-updates main restricted
-deb [arch=arm64] http://ports.ubuntu.com/ jammy universe
-deb [arch=arm64] http://ports.ubuntu.com/ jammy-updates universe
-deb [arch=arm64] http://ports.ubuntu.com/ jammy multiverse
-deb [arch=arm64] http://ports.ubuntu.com/ jammy-updates multiverse
-deb [arch=arm64] http://ports.ubuntu.com/ jammy-backports main restricted universe multiverse
-EOF
-apt update
-
-apt -y install build-essential git python3
-
-# Install Linaro cross compile toolchain
-apt -y install curl xz-utils
-curl -L -O https://releases.linaro.org/components/toolchain/binaries/7.4-2019.02/aarch64-linux-gnu/$LINARO_VERSION.tar.xz
-mkdir /toolchains
-pushd /toolchains
-tar Jxvf ../$LINARO_VERSION.tar.xz
-popd
-
-export ARCH=arm64 \
-    CC=aarch64-linux-gnu-gcc \
-    CXX=aarch64-linux-gnu-g++ \
-    PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
-    CROSS_COMPILE=aarch64-linux-gnu- \
-    DEB_HOST_MULTIARCH=aarch64-linux-gnu \
-    PATH=/toolchains/$LINARO_VERSION/bin:$PATH
-
-# 
-# Cross compile Linux kernel
-# 
-
-apt -y install build-essential bison flex libncurses-dev libssl-dev libelf-dev git bc rsync cpio kmod git
-
-# Get linux Linux kernel
-git clone --depth 1 -b odroid-5.10.y-rt https://github.com/tobetter/linux.git
-pushd linux
-
-# make odroidg12_defconfig
-cp /media/$USER/BOOT/config-5.15.0-odroid-arm64 .config
-echo 'CONFIG_PREEMPT_RT=y' >> .config
-echo 'CONFIG_PREEMPT_RT_FULL=y' >> .config
-echo 'CONFIG_VIRTUALIZATION=n' >> .config
-echo 'CONFIG_ARCH_SUPPORTS_RT=y' >> .config
-echo 'CONFIG_LOCALVERSION_AUTO=y' >> .config
-yes "" | make oldconfig
-echo "-odroid-arm64" > .scmversion
-
-# Cross compile kernel
-make -j$(expr $(nproc) + 1)
-make modules
-make Image
-
-# Install onto SD card
-make install INSTALL_PATH=/media/$USER/BOOT
-make modules_install INSTALL_MOD_PATH=/media/$USER/rootfs
-make headers_install INSTALL_HDR_PATH=/media/$USER/rootfs/usr/src/linux-headers-5.10.18-rt32-odroid-arm64
-
-sed -i "s/^force=.*$/force=\"yes\"/g" /media/$USER/rootfs/usr/share/flash-kernel/functions
-cp -R arch/arm64/boot/dts /media/$USER/rootfs/usr/lib/linux-image-$(cat include/config/kernel.release)
-cp arch/arm64/boot/dts/amlogic/meson64_odroidn2_plus.dtb /media/$USER/rootfs/etc/flash-kernel/dtbs
-
-# 
-# Cross compile LinuxCNC
-# 
-
-git clone -b 2.9 --depth 1 https://github.com/LinuxCNC/linuxcnc.git /linuxcnc
-pushd /linuxcnc
-
-apt install -y dh-python docbook-xsl asciidoc ghostscript imagemagick \
-    asciidoc-dblatex desktop-file-utils intltool po4a python3 python3-tk \
-    python3-xlib tclx yapps2 netcat bwidget psmisc \
-    libudev-dev:arm64 libboost-python-dev:arm64 libepoxy-dev:arm64 \
-    tcl8.6-dev:arm64 libgl1-mesa-dev:arm64 libglu1-mesa-dev:arm64 \
-    libgtk2.0-dev:arm64 libgtk-3-dev:arm64 libmodbus-dev:arm64 \
-    libeditreadline-dev:arm64 libtirpc-dev:arm64 libusb-1.0-0-dev:arm64 \
-    libxmu-dev:arm64 tk8.6-dev:arm64 libudev-dev:arm64
-# python3-dev:arm64 ?
-apt -y install crossbuild-essential-arm64
-
-# Use correct ld
-export PATH="/usr/aarch64-linux-gnu/bin:$PATH"
-
-# Configure for Debian packaging
-sed -i 's/Ubuntu-21/Ubuntu-22/' ./debian/configure
-./debian/configure no-docs
-# Apply hacks to support cross compile
-sed -i 's/[(]void[)]//g' ./src/rtapi/rtapi_io.h
-sed -i 's/\.\/configure/.\/configure --host=$(DEB_HOST_MULTIARCH) --target=$(DEB_HOST_MULTIARCH) --with-kernel-headers=\/linux\/include/' debian/rules
-dpkg-buildpackage --host-arch arm64 --target-arch arm64 --build=binary --unsigned-changes --no-check-builddeps
-
-popd
-cp linuxcnc-*.deb /media/$USER/rootfs
-
-# ----------------------
+#######################################
 # On: Odroid N2+
-# ----------------------
+# login = root/odroid
+#######################################
 
-# Build new initr
-sudo update-initramfs -k 5.10.18-rt32-odroid-arm64 -c
+# Create a new host key and start sshd
+ssh-keygen -A
+systemctl restart sshd
 
-sudo cp /boot/boot.scr /boot/boot.scr.bak2
+# Upgrade everything we can
+apt update && apt upgrade && apt dist-upgrade
+
+# Set a timezone
+dpkg-reconfigure tzdata
+
+# Fix locale message
+echo 'LC_ALL="en_US.UTF-8"' /etc/default/locale
+echo 'export LC_ALL="en_US.UTF-8"' >> .basrc
+source .basrc
+
+# Install latest PREEMPT_RT kernel
+# apt-cache policy linux-image-rt-arm64
+OLD_KERNEL=$(uname -r)
+apt remove linux-image-arm64-odroid linux-headers-arm64-odroid
+cp -av /usr/lib/linux-image-${OLD_KERNEL}/amlogic/meson64* /etc/flash-kernel/dtbs/
+apt install -t bullseye-backports linux-image-rt-arm64 linux-headers-rt-arm64
+# dpkg --list | grep linux-image
+NEW_KERNEL="6.0.0-0.deb11.6-rt-arm64"
+flash-kernel --force ${NEW_KERNEL}
+echo "fk_kvers=\"${NEW_KERNEL}\"" >> /boot/config.ini
+
+# Run CPU at max frequency
+echo 'performance' > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 
+
+# Set kernel command line
+cp /boot/boot.scr /boot/boot.scr.bak
 dd if=/boot/boot.scr of=boot.txt bs=72 skip=1
-# sudo sed -i 's/net\.ifnames\=0/net.ifnames=0 processor.max_cstate=1 isolcpus=2,3,4,5 workqueue.power_efficient=0/' boot.txt
-sudo sed -i 's/net\.ifnames\=0/net.ifnames=0 processor.max_cstate=1 isolcpus=2,3,4,5 workqueue.power_efficient=0/' boot.txt
-sudo mkimage -A arm -T script -C none -n "Ubuntu boot script" -d boot.txt /boot/boot.scr
+sed -i 's/no_console_suspend/no_console_suspend processor.max_cstate=1 isolcpus=2,3,4,5 workqueue.power_efficient=0 idle=poll/' boot.txt
+mkimage -A arm -T script -C none -n "Ubuntu boot script" -d boot.txt /boot/boot.scr
 
-# Use performance cpu scaling
-echo -n 'performance' | sudo tee /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
-
-# Start xterm when X starts
-sudo apt install -y mesa-utils xserver-xorg xserver-xorg-input-all xterm xinit
-echo 'xterm' > .xinitrc
+# Install graphical interface
+apt install -y task-xfce-desktop
 
 # Stop useless services, sockets, timers, etc.
-sudo systemctl disable --now \
+systemctl disable --now \
   rsyslog.service systemd-timesyncd.service systemd-journald.service cron.service \
   wpa_supplicant.service packagekit.service unattended-upgrades.service snapd.service \
   multipathd.service \
   systemd-journald-dev-log.socket systemd-journald.socket systemd-journald-audit.socket \
   snapd.socket syslog.socket multipathd.socket
 
-# Install LinuxCNC
-sudo apt install ./*.deb
+# Clean up an unneeded packages
+apt -y autoremove
 
-# 
+# Reboot into new kernel
+reboot
+
+# -------------------------------------
+# Build LinuxCNC
+# -------------------------------------
+
+# Install build dependencies
+apt install -y build-essential git python3 \
+    dpkg-dev fakeroot dh-python debhelper python3-tk \
+    docbook-xsl asciidoc ghostscript imagemagick \
+    asciidoc-dblatex desktop-file-utils intltool po4a \
+    python3-xlib tclx yapps2 netcat bwidget psmisc \
+    libudev-dev libboost-python-dev libepoxy-dev \
+    tcl8.6-dev libgl1-mesa-dev libglu1-mesa-dev \
+    libgtk2.0-dev libgtk-3-dev libmodbus-dev \
+    libeditreadline-dev libtirpc-dev libusb-1.0-0-dev \
+    libxmu-dev tk8.6-dev libudev-dev python3-dev
+
+# Get source code
+git clone -b 2.9 --depth 1 https://github.com/LinuxCNC/linuxcnc.git build
+
+# Create Debian package
+pushd build
+./debian/configure no-docs
+dpkg-buildpackage --build=binary --unsigned-changes 
+popd
+
+# Install required dependencies
+apt install -y mesa-utils python3-numpy python3-cairo python3-gi-cairo \
+    python3-opengl libgtksourceview-3.0-dev tclreadline python3-pyqt5 dblatex \
+    texlive-extra-utils texlive-fonts-recommended texlive-latex-recommended \
+    texlive-xetex xsltproc 
+# Install suggested packages
+apt install -y librsvg2-dev python3-pil \
+    python3-pil.imagetk python3-pyqt5 python3-pyqt5.* python3-opencv \
+    python3-dbus python3-espeak python3-dbus.mainloop.pyqt5 espeak-ng \
+    pyqt5-dev-tools gstreamer1.0-tools espeak sound-theme-freedesktop \
+    python3-poppler-qt5
+# Install LinuxCNC package
+dpkg -i ./linuxcnc-*.deb
+
+# -------------------------------------
+# Configure LinuxCNC
+# -------------------------------------
+
+# Configure notification service
+apt install -y notification-daemon
+cat | tee /usr/share/dbus-1/services/org.freedesktop.Notifications.service <<EOF
+[D-BUS Service]
+Name=org.freedesktop.Notifications
+Exec=/usr/lib/notification-daemon/notification-daemon
+EOF
+
+# Install Qt Designer
+# Select option 3
+sudo sed -i 's/x86_64-linux-gnu/aarch64-linux-gnu/' /usr/lib/python3/dist-packages/qtvcp/designer/install_script
+/usr/lib/python3/dist-packages/qtvcp/designer/install_script
+
+# Fix virtual keyboard
+apt -y install python3-pip onboard
+pip install pygst
+sed -i 's/stderr=subprocess.PIPE,/stderr=subprocess.PIPE, text=True,/' /usr/lib/python3/dist-packages/gladevcp/hal_filechooser.py
+
+# Create a user
+useradd -m linuxcnc
+passwd linuxcnc
+
+# -------------------------------------
 # Latency testing
-# 
+# -------------------------------------
 
 # Find best-case latency numbers
-sudo apt install rt-tests
-sudo cyclictest --mlockall --smp --priority=99 --interval=200 --distance=0
+apt install rt-tests
+schedtool -a 2-5 -e nice -n 99 cyclictest --mlockall --smp --priority=99 --interval=200 --distance=0
 
 # Run LinuxCNC latency test
 apt install -y stress-ng
@@ -173,17 +155,5 @@ apt install -y stress-ng
 DISPLAY=:0 schedtool -a 2-5 -e nice -n99 latency-histogram >/dev/null 2>&1 &
 # then un a stress-ng CPU stressor on each reserved CPU
 seq 2 5 | xargs -i -P 4 taskset -c {} stress-ng --cpu 1 --cpu-method all -t 10m &
-# or run 7 instances of glxgears
+# OR run 7 instances of glxgears
 seq 1 7 | DISPLAY=:0 xargs -i -P 7 schedtool -a 2-5 -e nice -n99 glxgears >/dev/null 2>&1 &
-
-#
-# Debugging
-#
-
-# Find processes doing io
-sudo apt install -y iotop
-sudo iotop -ao
-
-# Back up SD card
-# unmount /media/$USER/*
-# sudo dd bs=4M if=/dev/mmcblk0 | gzip > odroid-n2-plus_5.10.18-rt32-odroid-arm64.img.gz
