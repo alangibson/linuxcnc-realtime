@@ -56,7 +56,7 @@ echo 'performance' > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
 # Set kernel command line
 cp /boot/boot.scr /boot/boot.scr.bak
 dd if=/boot/boot.scr of=boot.txt bs=72 skip=1
-sed -i 's/no_console_suspend/no_console_suspend processor.max_cstate=1 isolcpus=2,3,4,5 workqueue.power_efficient=0 idle=poll/' boot.txt
+sed -i 's/no_console_suspend/no_console_suspend processor.max_cstate=1 isolcpus=2,3,4,5 workqueue.power_efficient=0/' boot.txt
 mkimage -A arm -T script -C none -n "Ubuntu boot script" -d boot.txt /boot/boot.scr
 
 # Install graphical interface
